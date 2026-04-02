@@ -79,7 +79,8 @@ class ScanpathDataset(Dataset):
     def __init__(self, json_path, width=1904, height=988, max_fixations=12,
                  max_samples=None,
                  norm_stats: ScanpathNormStats = None,
-                 cond_norm_stats: CondNormStats = None):
+                 cond_norm_stats: CondNormStats = None,
+                 cond_noise_std: float = 0.0):
         with open(json_path, 'r', encoding='utf-8') as f:
             self.data = json.load(f)
         if max_samples is not None:
@@ -92,6 +93,7 @@ class ScanpathDataset(Dataset):
 
         self.norm_stats      = norm_stats      if norm_stats      is not None else fit_norm_stats(self.data)
         self.cond_norm_stats = cond_norm_stats if cond_norm_stats is not None else fit_cond_norm_stats(self.data)
+        self.cond_noise_std  = cond_noise_std
 
     def __len__(self):
         return len(self.data)
@@ -167,6 +169,8 @@ class ScanpathDataset(Dataset):
 
         cond_geom   = torch.tensor(geom_rows,   dtype=torch.float32)   # [6, 4]
         cond_signal = torch.tensor(signal_rows, dtype=torch.float32)   # [6, nf, SIGNAL_DIM]
+        if self.cond_noise_std > 0.0:
+            cond_signal = cond_signal + torch.randn_like(cond_signal) * self.cond_noise_std
 
         return {
             'seq':          seq,           # [max_fixations, 4]  — TARGET

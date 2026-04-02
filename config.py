@@ -7,7 +7,7 @@ Architecture:
 """
 
 # ─────────────────────────────────────────────
-MODEL_NAME = "hm_ar_256_ur_dis"
+MODEL_NAME = "hm_ar_256_ur_dis_gur1"
 
 # ─────────────────────────────────────────────
 # Paths
@@ -22,7 +22,7 @@ FRAMES_DIR = f"{_MODEL_ROOT}/data/frames"
 VIS_DIR    = f"{_MODEL_ROOT}/data/visualizations/{MODEL_NAME}"
 CHECKPOINT_DIR       = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}"
 CHECKPOINT_PATH      = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_last.pth"
-BEST_CHECKPOINT_PATH = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_last.pth"
+BEST_CHECKPOINT_PATH = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_best.pth"
 LOG_PATH             = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_log.csv"
 PLOT_PATH            = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_metrics.png"
 PRED_DIR             = f"{_MODEL_ROOT}/data/predictions/{MODEL_NAME}"
@@ -50,7 +50,7 @@ SIGNAL_DIM      = sum(_FEATURE_DIMS[f] for f in SIGNAL_FEATURES)
 # ─────────────────────────────────────────────
 HM_W          = 96    # heatmap width  (columns)  → cell = 1904/96 ≈ 19.8 px
 HM_H          = 50    # heatmap height (rows)     → cell = 988/50  ≈ 19.8 px
-HM_SIGMA_CELLS = 2.5  # Gaussian sigma for target smoothing (~50 px in image space)
+HM_SIGMA_CELLS = 1.5  # Gaussian sigma for target smoothing (2.5 gives~50 px in image space)
 
 # ─────────────────────────────────────────────
 # Model architecture
@@ -60,12 +60,20 @@ NUM_HEADS          = 4
 NUM_ENCODER_BLOCKS = 3    # transformer encoder depth over conditioning tokens
 NUM_GRU_LAYERS     = 1    # GRU decoder depth
 ATTN_DROPOUT       = 0.1
+# Std of Gaussian noise added to cond_signal during training (0 = disabled).
+# Signals are normalised to roughly [-1, 1]; 0.05 is a mild perturbation.
+COND_SIGNAL_NOISE_STD = 0
+# How many previous fixations the GRU carries as hidden state.
+#   1  = only the immediately preceding fixation (h_state reset every step)
+#   N  = reset every N steps — GRU sees chunks of N consecutive fixations
+#   0  = never reset — full accumulated trajectory history (original behaviour)
+GRU_HISTORY_STEPS  = 1
 
 # ─────────────────────────────────────────────
 # Training
 # ─────────────────────────────────────────────
 SEED           = 42
-EPOCHS         = 400
+EPOCHS         = 200
 BATCH_SIZE     = 32
 LEARNING_RATE  = 1e-4
 LR_MIN         = 1e-6
@@ -87,7 +95,7 @@ SAVE_EVERY = 0   # 0 = disabled
 VAL_BATCH_SIZE       = 64
 EVAL_EVERY           = 25
 EVAL_RUNS            = 3
-INFERENCE_TEMPERATURE = 1.0   # softmax temperature at sampling (1.0 = raw probs)
+INFERENCE_TEMPERATURE = 0.1   # softmax temperature at sampling (1.0 = raw probs)
 
 # ─────────────────────────────────────────────
 # Visualization

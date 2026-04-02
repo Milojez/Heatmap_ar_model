@@ -86,6 +86,7 @@ def main():
         width=config.IMAGE_WIDTH, height=config.IMAGE_HEIGHT,
         max_fixations=config.MAX_FIXATIONS,
         max_samples=config.MAX_TRAIN_SAMPLES,
+        cond_noise_std=config.COND_SIGNAL_NOISE_STD,
     )
     val_ds = ScanpathDataset(
         config.VAL_JSON,

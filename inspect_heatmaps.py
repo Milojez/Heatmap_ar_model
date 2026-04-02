@@ -73,7 +73,10 @@ def generate_with_heatmaps(model, cond_geom, cond_signal, num_fixations,
     prob_maps  = []
     sampled_px = []
 
+    k = config.GRU_HISTORY_STEPS
     for step in range(num_fixations):
+        if k > 0 and step % k == 0:
+            h_state = None   # reset every k steps
         hm_logits, temporal, h_state = model._decode_step(
             prev_xy, step, memory, h_state
         )   # hm_logits: [1, HM_H*HM_W]

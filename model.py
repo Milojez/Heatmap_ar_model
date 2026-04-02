@@ -175,7 +175,21 @@ class HeatmapARModel(nn.Module):
         fix_embs     = self.fix_proj(prev_xy)                      # [B, N, H]
 
         gru_in = fix_embs + step_embs.unsqueeze(0)                 # [B, N, H]
-        gru_out, _ = self.gru(gru_in)                              # [B, N, H]
+
+        k = config.GRU_HISTORY_STEPS
+        if k == 0:
+            # Full accumulated history (original behaviour)
+            gru_out, _ = self.gru(gru_in)                         # [B, N, H]
+        else:
+            # Reset h_state every k steps so the GRU sees at most k prev fixations
+            gru_outs = []
+            h = None
+            for t in range(N):
+                if t % k == 0:
+                    h = None
+                out, h = self.gru(gru_in[:, t:t+1, :], h)        # [B, 1, H]
+                gru_outs.append(out)
+            gru_out = torch.cat(gru_outs, dim=1)                  # [B, N, H]
 
         # Cross-attention (all steps at once)
         ctx, _ = self.cross_attn(gru_out, memory, memory)         # [B, N, H]
@@ -207,7 +221,10 @@ class HeatmapARModel(nn.Module):
 
         results = []
 
+        k = config.GRU_HISTORY_STEPS
         for step in range(num_fixations):
+            if k > 0 and step % k == 0:
+                h_state = None   # reset every k steps
             hm_logits, temporal, h_state = self._decode_step(
                 prev_xy, step, memory, h_state
             )

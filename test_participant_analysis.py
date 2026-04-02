@@ -35,7 +35,7 @@ PARTICIPANT_ID   = 1
 CKPT_PATH        = Path(config.BEST_CHECKPOINT_PATH)
 N_AR_RUNS        = 1     # generation runs per test sample (1 = comparable to participant)
 RUN_ALL_SUBJECTS = False
-OUT_DIR          = Path(config.CHECKPOINT_DIR) / "test_analysis"
+OUT_DIR          = Path(config.VIS_DIR) / "AOI_fractions"
 PRED_CACHE_DIR   = Path(config.PRED_DIR)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -105,6 +105,12 @@ def fixations_xy(item_raw):
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
+def video_id(name):
+    first = name[0] if isinstance(name, list) else name
+    m = re.match(r'(video_\d+)', first)
+    return m.group(1) if m else ''
+
+
 def load_test_data():
     with open(config.TEST_JSON, encoding='utf-8') as f:
         raw = json.load(f)
@@ -113,6 +119,21 @@ def load_test_data():
         by_frame.setdefault(frame_key(s['name']), []).append(s)
     sorted_keys = sorted(by_frame)
     return raw, by_frame, sorted_keys
+
+
+def load_train_video_data(video_num):
+    """Load training samples for a specific video number."""
+    vid = f"video_{video_num}"
+    with open(config.TRAIN_JSON, encoding='utf-8') as f:
+        raw = json.load(f)
+    filtered = [s for s in raw if video_id(s['name']) == vid]
+    by_frame = {}
+    for s in filtered:
+        by_frame.setdefault(frame_key(s['name']), []).append(s)
+    sorted_keys = sorted(by_frame)
+    print(f"Training video {video_num}: {len(filtered)} samples, "
+          f"{len(sorted_keys)} unique frames.")
+    return filtered, by_frame, sorted_keys
 
 
 def train_aoi_fracs():
@@ -138,7 +159,13 @@ def target_for_participant(pid, by_frame, sorted_keys):
 # ── Prediction cache ───────────────────────────────────────────────────────────
 
 def _cache_path(pid):
-    return PRED_CACHE_DIR / f"{CKPT_PATH.stem}_p{pid}_runs{N_AR_RUNS}.json"
+    T = config.INFERENCE_TEMPERATURE
+    return PRED_CACHE_DIR / f"{CKPT_PATH.stem}_p{pid}_runs{N_AR_RUNS}_T{T}.json"
+
+
+def _cache_path_train(pid, video_num):
+    T = config.INFERENCE_TEMPERATURE
+    return PRED_CACHE_DIR / f"{CKPT_PATH.stem}_p{pid}_train_v{video_num}_runs{N_AR_RUNS}_T{T}.json"
 
 
 def _save_predictions(predictions, target, pid):
@@ -216,6 +243,52 @@ def run_inference(model, test_ds, target, device, pid):
     return predictions
 
 
+def run_inference_train(model, train_ds, target, device, pid, video_num):
+    """Run (or load cached) inference for training samples."""
+    cache = _cache_path_train(pid, video_num)
+    if cache.exists():
+        with open(cache) as f:
+            data = json.load(f)
+        print(f"  P{pid} train v{video_num}: loaded {len(data)} cached predictions.")
+        return [np.array(e["xy"]) if e is not None else None for e in data]
+
+    ds_index = {(s['subject'], frame_key(s['name'])): i
+                for i, s in enumerate(train_ds.data)}
+
+    predictions = []
+    with torch.no_grad():
+        for k, raw_s in tqdm(target, desc=f"Inference P{pid} train v{video_num}", unit="sample"):
+            ds_idx = ds_index.get((pid, k))
+            if ds_idx is None:
+                predictions.append(None)
+                continue
+
+            item   = train_ds[ds_idx]
+            length = raw_s['length']
+
+            cond_geom   = item['cond_geom'].unsqueeze(0).to(device)
+            cond_signal = item['cond_signal'].unsqueeze(0).to(device)
+
+            run_xys = []
+            for _ in range(N_AR_RUNS):
+                pred = model.generate(
+                    cond_geom, cond_signal,
+                    num_fixations=length,
+                    temperature=config.INFERENCE_TEMPERATURE,
+                ).squeeze(0).cpu()
+                xs = (pred[:, 0] + 1) / 2 * W
+                ys = (pred[:, 1] + 1) / 2 * H
+                run_xys.append(np.stack([xs.numpy(), ys.numpy()], axis=1))
+
+            predictions.append(np.concatenate(run_xys, axis=0))
+
+    PRED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_data = [{"xy": p.tolist()} if p is not None else None for p in predictions]
+    with open(cache, 'w') as f:
+        json.dump(cache_data, f)
+    return predictions
+
+
 # ── Per-sample metrics ─────────────────────────────────────────────────────────
 
 def compute_sample_metrics(target, predictions, by_frame, pid):
@@ -262,7 +335,7 @@ def plot_heatmaps(all_xs, all_ys, target_xs, target_ys, pred_xs, pred_ys, tag):
             ax.text((x0+x1)/2, (y0+y1)/2, str(pos), color='white',
                     ha='center', va='center', fontsize=8, fontweight='bold')
         ax.set_title(title, fontsize=10); ax.axis('off')
-    fig.suptitle(f"Fixation heatmaps — {tag}", fontsize=12)
+    fig.suptitle(f"Fixation heatmaps — {tag}  (T={config.INFERENCE_TEMPERATURE})", fontsize=12)
     plt.tight_layout()
     p = OUT_DIR / f"{tag}_heatmaps.png"
     plt.savefig(p, dpi=120, bbox_inches='tight'); plt.close()
@@ -325,7 +398,7 @@ def plot_routing(target_fracs, all_test_fracs, model_fracs, train_fracs, tag):
         [f'P{PARTICIPANT_ID}', 'All test participants', 'Model', 'Training data'],
         ['steelblue', 'gold', 'tomato', 'seagreen'],
         "Fraction of dwell time",
-        f"AOI dwell-time fraction  |  {tag}",
+        f"AOI dwell-time fraction  |  {tag}  (T={config.INFERENCE_TEMPERATURE})",
     )
     plt.tight_layout()
     p = OUT_DIR / f"{tag}_aoi_fractions.png"
@@ -342,7 +415,7 @@ def plot_routing_count(target_count, all_test_count, model_count, train_count, t
         [f'P{PARTICIPANT_ID}', 'All test participants', 'Model', 'Training data'],
         ['steelblue', 'gold', 'tomato', 'seagreen'],
         "Fraction of fixation count",
-        f"AOI fixation-count fraction  |  {tag}",
+        f"AOI fixation-count fraction  |  {tag}  (T={config.INFERENCE_TEMPERATURE})",
     )
     plt.tight_layout()
     p = OUT_DIR / f"{tag}_aoi_count_fractions.png"
@@ -531,6 +604,7 @@ def plot_proximity_correlation(target, by_frame, predictions, tag):
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    T      = config.INFERENCE_TEMPERATURE
     tag    = f"{CKPT_PATH.stem}_p{PARTICIPANT_ID}"
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     PRED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -553,44 +627,6 @@ def main():
 
     predictions = run_inference(model, test_ds, target, device, PARTICIPANT_ID)
 
-    (p_dist, p_center, p_spread), (m_dist, m_center, m_spread) = \
-        compute_sample_metrics(target, predictions, by_frame, PARTICIPANT_ID)
-
-    avg_p_dist_aligned = avg_p_center_aligned = avg_p_spread_aligned = None
-    all_p_mean_dist = all_p_mean_center = all_p_mean_spread = []
-
-    if RUN_ALL_SUBJECTS:
-        all_subjects = sorted({s['subject'] for samples in by_frame.values() for s in samples})
-        print(f"\nRunning/loading inference for all {len(all_subjects)} participants...")
-        per_sample_d = [[] for _ in sorted_keys]
-        per_sample_c = [[] for _ in sorted_keys]
-        per_sample_s = [[] for _ in sorted_keys]
-        frame_to_idx = {k: i for i, k in enumerate(sorted_keys)}
-
-        all_p_mean_dist, all_p_mean_center, all_p_mean_spread = [], [], []
-        for pid in tqdm(all_subjects, desc="All participants", unit="participant"):
-            t_p = target_for_participant(pid, by_frame, sorted_keys)
-            if not t_p: continue
-            preds_p = run_inference(model, test_ds, t_p, device, pid)
-            (pd, pc, ps), _ = compute_sample_metrics(t_p, preds_p, by_frame, pid)
-            all_p_mean_dist.append(np.nanmean(pd))
-            all_p_mean_center.append(np.nanmean(pc))
-            all_p_mean_spread.append(np.nanmean(ps))
-            for (k, _), dv, cv, sv in zip(t_p, pd, pc, ps):
-                si = frame_to_idx.get(k)
-                if si is not None:
-                    per_sample_d[si].append(dv)
-                    per_sample_c[si].append(cv)
-                    per_sample_s[si].append(sv)
-
-        avg_d = [float(np.nanmean(v)) if v else float('nan') for v in per_sample_d]
-        avg_c = [float(np.nanmean(v)) if v else float('nan') for v in per_sample_c]
-        avg_s = [float(np.nanmean(v)) if v else float('nan') for v in per_sample_s]
-        fti   = {k: i for i, k in enumerate(sorted_keys)}
-        avg_p_dist_aligned   = [avg_d[fti[k]] for k, _ in target]
-        avg_p_center_aligned = [avg_c[fti[k]] for k, _ in target]
-        avg_p_spread_aligned = [avg_s[fti[k]] for k, _ in target]
-
     # Collect fixations for heatmap + AOI fractions
     all_xs, all_ys, all_Ts = [], [], []
     for samples in tqdm(by_frame.values(), desc="Collecting fixations", unit="frame"):
@@ -610,12 +646,6 @@ def main():
 
     plot_heatmaps(all_xs, all_ys, target_xs, target_ys, pred_xs, pred_ys, tag)
 
-    avg_series = (list(zip(avg_p_dist_aligned, avg_p_center_aligned, avg_p_spread_aligned))
-                  if avg_p_dist_aligned is not None else None)
-    plot_metrics(list(zip(p_dist, p_center, p_spread)),
-                 list(zip(m_dist, m_center, m_spread)),
-                 avg_series, tag)
-
     train_dwell_fracs, train_count_fracs = train_aoi_fracs()
 
     plot_routing(
@@ -632,33 +662,62 @@ def main():
         train_count_fracs,                              # training count
         tag,
     )
-    plot_routing_by_fixnum(target, predictions, by_frame, tag)
-    plot_proximity_correlation(target, by_frame, predictions, tag)
 
-    header = f"{'Metric':<22} {'P'+str(PARTICIPANT_ID)+' vs group':>18} {'Model vs group':>18}"
-    if RUN_ALL_SUBJECTS:
-        header += f" {'Avg all P vs group':>20}"
-    print(f"\n{header}\n{'-'*len(header)}")
-    for name, pv, mv, av in zip(
-            ['Dist(H) [px]', 'Center loss [px]', 'Spread loss [px]'],
-            [p_dist, p_center, p_spread],
-            [m_dist, m_center, m_spread],
-            [all_p_mean_dist, all_p_mean_center, all_p_mean_spread]):
-        row = f"{name:<22} {np.nanmean(pv):>18.1f} {np.nanmean(mv):>18.1f}"
-        if RUN_ALL_SUBJECTS:
-            row += f" {np.nanmean(av):>20.1f}"
-        print(row)
+    # ── Training video 1 analysis ─────────────────────────────────────────────
+    TRAIN_VIDEO = 1
+    print(f"\n=== Training video {TRAIN_VIDEO} analysis ===")
+    train_vid_tag = f"{CKPT_PATH.stem}_p{PARTICIPANT_ID}_train_v{TRAIN_VIDEO}"
 
-    target_fracs   = aoi_fracs(target_xs, target_ys, target_Ts)
-    all_test_fracs = aoi_fracs(all_xs, all_ys, all_Ts)
-    model_fracs    = aoi_fracs(pred_xs, pred_ys)
-    print(f"\nAOI dwell fractions — P{PARTICIPANT_ID} | All test | Model | Training:")
-    print(f"  {'Dial':<6} {'P'+str(PARTICIPANT_ID):>8} {'AllTest':>8} {'Model':>8} {'Train':>8} {'M-P':>8} {'M-T':>8}")
-    for d in sorted(AOI_BY_POSITION):
-        print(f"  {d:<6} {target_fracs[d]:>8.3f} {all_test_fracs[d]:>8.3f} "
-              f"{model_fracs[d]:>8.3f} {train_dwell_fracs[d]:>8.3f} "
-              f"{model_fracs[d]-target_fracs[d]:>+8.3f} "
-              f"{model_fracs[d]-train_dwell_fracs[d]:>+8.3f}")
+    tv_raw, tv_by_frame, tv_sorted_keys = load_train_video_data(TRAIN_VIDEO)
+    tv_target = target_for_participant(PARTICIPANT_ID, tv_by_frame, tv_sorted_keys)
+    if not tv_target:
+        print(f"  P{PARTICIPANT_ID} has no samples in training video {TRAIN_VIDEO} — skipping.")
+    else:
+        print(f"  P{PARTICIPANT_ID}: {len(tv_target)} training video {TRAIN_VIDEO} samples.")
+        tv_predictions = run_inference_train(
+            model, train_ds, tv_target, device, PARTICIPANT_ID, TRAIN_VIDEO)
+
+        # Collect fixations
+        tv_all_xs, tv_all_ys, tv_all_Ts = [], [], []
+        for samples in tv_by_frame.values():
+            for s in samples:
+                n = s['length']
+                tv_all_xs.extend(s['X'][:n])
+                tv_all_ys.extend(s['Y'][:n])
+                tv_all_Ts.extend(s['T'][:n])
+
+        tv_target_xs, tv_target_ys, tv_target_Ts = [], [], []
+        for _, s in tv_target:
+            n = s['length']
+            tv_target_xs.extend(s['X'][:n])
+            tv_target_ys.extend(s['Y'][:n])
+            tv_target_Ts.extend(s['T'][:n])
+
+        tv_pred_xs, tv_pred_ys = [], []
+        for p in tv_predictions:
+            if p is not None:
+                tv_pred_xs.extend(p[:, 0])
+                tv_pred_ys.extend(p[:, 1])
+
+        plot_heatmaps(tv_all_xs, tv_all_ys,
+                      tv_target_xs, tv_target_ys,
+                      tv_pred_xs, tv_pred_ys, train_vid_tag)
+
+        # For AOI fracs: use full training set dwell as "training data" reference
+        plot_routing(
+            aoi_fracs(tv_target_xs, tv_target_ys, tv_target_Ts),
+            aoi_fracs(tv_all_xs,    tv_all_ys,    tv_all_Ts),
+            aoi_fracs(tv_pred_xs,   tv_pred_ys),
+            train_dwell_fracs,
+            train_vid_tag,
+        )
+        plot_routing_count(
+            aoi_fracs(tv_target_xs, tv_target_ys),
+            aoi_fracs(tv_all_xs,    tv_all_ys),
+            aoi_fracs(tv_pred_xs,   tv_pred_ys),
+            train_count_fracs,
+            train_vid_tag,
+        )
 
     print(f"\nAll outputs saved to {OUT_DIR}/")
 
