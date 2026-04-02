@@ -33,7 +33,7 @@ from dataset import ScanpathDataset, denorm_duration
 # ── User settings ──────────────────────────────────────────────────────────────
 PARTICIPANT_ID   = 1
 CKPT_PATH        = Path(config.BEST_CHECKPOINT_PATH)
-N_AR_RUNS        = 3     # generation runs averaged per prediction
+N_AR_RUNS        = 1     # generation runs per test sample (1 = comparable to participant)
 RUN_ALL_SUBJECTS = False
 OUT_DIR          = Path(config.CHECKPOINT_DIR) / "test_analysis"
 PRED_CACHE_DIR   = Path(config.PRED_DIR)
@@ -115,6 +115,20 @@ def load_test_data():
     return raw, by_frame, sorted_keys
 
 
+def train_aoi_fracs():
+    """Return (dwell_fracs, count_fracs) pooled over the entire training set."""
+    with open(config.TRAIN_JSON, encoding='utf-8') as f:
+        train_raw = json.load(f)
+    xs, ys, Ts = [], [], []
+    for s in train_raw:
+        n = s['length']
+        xs.extend(s['X'][:n])
+        ys.extend(s['Y'][:n])
+        Ts.extend(s['T'][:n])
+    print(f"Training data: {len(train_raw)} samples, {len(xs)} fixations total.")
+    return aoi_fracs(xs, ys, Ts), aoi_fracs(xs, ys)
+
+
 def target_for_participant(pid, by_frame, sorted_keys):
     target = [next((s for s in by_frame[k] if s['subject'] == pid), None)
               for k in sorted_keys]
@@ -124,7 +138,7 @@ def target_for_participant(pid, by_frame, sorted_keys):
 # ── Prediction cache ───────────────────────────────────────────────────────────
 
 def _cache_path(pid):
-    return PRED_CACHE_DIR / f"{CKPT_PATH.stem}_p{pid}.json"
+    return PRED_CACHE_DIR / f"{CKPT_PATH.stem}_p{pid}_runs{N_AR_RUNS}.json"
 
 
 def _save_predictions(predictions, target, pid):
@@ -182,7 +196,9 @@ def run_inference(model, test_ds, target, device, pid):
             cond_geom   = item['cond_geom'].unsqueeze(0).to(device)
             cond_signal = item['cond_signal'].unsqueeze(0).to(device)
 
-            # Average N_AR_RUNS independent samples for a stable prediction
+            # Concatenate N_AR_RUNS independent runs — each is a valid scanpath.
+            # Do NOT average coordinates: runs sampling different dials would create
+            # phantom fixations in empty space between dials.
             run_xys = []
             for _ in range(N_AR_RUNS):
                 pred = model.generate(
@@ -194,7 +210,7 @@ def run_inference(model, test_ds, target, device, pid):
                 ys = (pred[:, 1] + 1) / 2 * H
                 run_xys.append(np.stack([xs.numpy(), ys.numpy()], axis=1))
 
-            predictions.append(np.mean(run_xys, axis=0))
+            predictions.append(np.concatenate(run_xys, axis=0))  # [N_AR_RUNS*length, 2]
 
     _save_predictions(predictions, target, pid)
     return predictions
@@ -238,7 +254,7 @@ def plot_heatmaps(all_xs, all_ys, target_xs, target_ys, pred_xs, pred_ys, tag):
         if not xs:
             ax.set_title(title + "\n(no data)"); continue
         ax.imshow(make_density(np.array(xs), np.array(ys)),
-                  origin='lower', aspect='auto', extent=[0, W, 0, H], cmap=cmap)
+                  origin='upper', aspect='auto', extent=[0, W, H, 0], cmap=cmap)
         for pos, (x0, x1, y0, y1) in AOI_BY_POSITION.items():
             ax.add_patch(plt.Rectangle((x0, y0), x1-x0, y1-y0,
                                        fill=False, edgecolor='white',
@@ -287,20 +303,172 @@ def plot_metrics(p_metrics, m_metrics, avg_p_metrics, tag):
     print(f"Saved -> {p}")
 
 
-def plot_routing(target_fracs, model_fracs, tag):
-    dials = sorted(AOI_BY_POSITION)
-    x, w  = np.arange(len(dials)), 0.35
-    fig, ax = plt.subplots(figsize=(9, 4))
-    ax.bar(x - w/2, [target_fracs[d] for d in dials], w, label=f'P{PARTICIPANT_ID}',
-           color='steelblue', alpha=0.85)
-    ax.bar(x + w/2, [model_fracs[d]  for d in dials], w, label='Model',
-           color='tomato', alpha=0.85)
+def _four_bar_plot(ax, dials, vals_list, labels, colors, ylabel, title):
+    x = np.arange(len(dials))
+    n = len(vals_list)
+    w = 0.8 / n
+    offsets = np.linspace(-(n - 1) / 2, (n - 1) / 2, n) * w
+    for vals, label, color, offset in zip(vals_list, labels, colors, offsets):
+        ax.bar(x + offset, [vals[d] for d in dials], w,
+               label=label, color=color, alpha=0.85)
     ax.set_xticks(x); ax.set_xticklabels([f"Dial {d}" for d in dials])
-    ax.set_ylabel("Fraction of dwell time")
-    ax.set_title(f"AOI dwell fraction  |  {tag}")
-    ax.legend(); ax.grid(True, axis='y', alpha=0.3)
+    ax.set_ylabel(ylabel); ax.set_title(title)
+    ax.legend(fontsize=8); ax.grid(True, axis='y', alpha=0.3)
+
+
+def plot_routing(target_fracs, all_test_fracs, model_fracs, train_fracs, tag):
+    dials = sorted(AOI_BY_POSITION)
+    fig, ax = plt.subplots(figsize=(11, 4))
+    _four_bar_plot(
+        ax, dials,
+        [target_fracs, all_test_fracs, model_fracs, train_fracs],
+        [f'P{PARTICIPANT_ID}', 'All test participants', 'Model', 'Training data'],
+        ['steelblue', 'gold', 'tomato', 'seagreen'],
+        "Fraction of dwell time",
+        f"AOI dwell-time fraction  |  {tag}",
+    )
     plt.tight_layout()
     p = OUT_DIR / f"{tag}_aoi_fractions.png"
+    plt.savefig(p, dpi=120, bbox_inches='tight'); plt.close()
+    print(f"Saved -> {p}")
+
+
+def plot_routing_count(target_count, all_test_count, model_count, train_count, tag):
+    dials = sorted(AOI_BY_POSITION)
+    fig, ax = plt.subplots(figsize=(11, 4))
+    _four_bar_plot(
+        ax, dials,
+        [target_count, all_test_count, model_count, train_count],
+        [f'P{PARTICIPANT_ID}', 'All test participants', 'Model', 'Training data'],
+        ['steelblue', 'gold', 'tomato', 'seagreen'],
+        "Fraction of fixation count",
+        f"AOI fixation-count fraction  |  {tag}",
+    )
+    plt.tight_layout()
+    p = OUT_DIR / f"{tag}_aoi_count_fractions.png"
+    plt.savefig(p, dpi=120, bbox_inches='tight'); plt.close()
+    print(f"Saved -> {p}")
+
+
+def dial_by_fixnum(samples_xy_dur, max_fixations):
+    """
+    Compute dwell-time (or count if dur=None) fraction per (fixation_index, dial).
+
+    samples_xy_dur : list of (xy [N,2], dur [N] or None)
+    Returns        : [max_fixations, 6]  — each row sums to ≤1 (0 where no data)
+    """
+    sorted_dials = sorted(AOI_BY_POSITION.items())   # [(pos, (x0,x1,y0,y1)), ...]
+    dial_time  = np.zeros((max_fixations, 6))
+    total_time = np.zeros(max_fixations)
+
+    for xy, dur in samples_xy_dur:
+        n = min(len(xy), max_fixations)
+        for fi in range(n):
+            x, y = xy[fi, 0], xy[fi, 1]
+            w = float(dur[fi]) if dur is not None else 1.0
+            for di, (_, (x0, x1, y0, y1)) in enumerate(sorted_dials):
+                if x0 < x <= x1 and y0 <= y < y1:
+                    dial_time[fi, di] += w
+                    break
+            total_time[fi] += w
+
+    fracs = np.zeros_like(dial_time)
+    mask  = total_time > 0
+    fracs[mask] = dial_time[mask] / total_time[mask, None]
+    return fracs   # [max_fixations, 6]
+
+
+def plot_routing_by_fixnum(target, predictions, by_frame, tag):
+    """
+    Four heatmaps [dials × fixation_index]:
+      • P{PARTICIPANT_ID}      — actual dwell time per step
+      • All test participants  — dwell time per step (pooled)
+      • Model                  — fixation count per step (N_AR_RUNS runs)
+      • Training data          — dwell time per step (all training samples)
+    """
+    MF = config.MAX_FIXATIONS
+
+    # ── P{PARTICIPANT_ID} ─────────────────────────────────────────────────────
+    part_samples = []
+    for _, raw_s in target:
+        n = raw_s['length']
+        if n == 0:
+            continue
+        xy  = np.stack([raw_s['X'][:n], raw_s['Y'][:n]], axis=1).astype(float)
+        dur = np.array(raw_s['T'][:n], dtype=float)
+        part_samples.append((xy, dur))
+    fracs_part = dial_by_fixnum(part_samples, MF)
+
+    # ── All test participants (pooled) ────────────────────────────────────────
+    all_test_samples = []
+    for samples in by_frame.values():
+        for s in samples:
+            n = s['length']
+            if n == 0:
+                continue
+            xy  = np.stack([s['X'][:n], s['Y'][:n]], axis=1).astype(float)
+            dur = np.array(s['T'][:n], dtype=float)
+            all_test_samples.append((xy, dur))
+    fracs_all = dial_by_fixnum(all_test_samples, MF)
+
+    # ── Model (split concatenated runs back into individual scanpaths) ────────
+    model_samples = []
+    for (_, raw_s), pred_xy in zip(target, predictions):
+        if pred_xy is None:
+            continue
+        length = raw_s['length']
+        if length == 0:
+            continue
+        n_runs = len(pred_xy) // length
+        for r in range(n_runs):
+            run_xy = pred_xy[r * length:(r + 1) * length]
+            model_samples.append((run_xy, None))   # no duration from model
+    fracs_model = dial_by_fixnum(model_samples, MF)
+
+    # ── Training data ─────────────────────────────────────────────────────────
+    with open(config.TRAIN_JSON, encoding='utf-8') as f:
+        train_raw = json.load(f)
+    train_samples = []
+    for s in train_raw:
+        n = s['length']
+        if n == 0:
+            continue
+        xy  = np.stack([s['X'][:n], s['Y'][:n]], axis=1).astype(float)
+        dur = np.array(s['T'][:n], dtype=float)
+        train_samples.append((xy, dur))
+    fracs_train = dial_by_fixnum(train_samples, MF)
+
+    # ── Plot ──────────────────────────────────────────────────────────────────
+    dial_labels = [f"Dial {d}" for d in sorted(AOI_BY_POSITION)]
+    fix_labels  = [str(i + 1) for i in range(MF)]
+
+    titles = [
+        f"P{PARTICIPANT_ID} — dwell time\n(N={len(part_samples)} scanpaths)",
+        f"All test participants — dwell time\n(N={len(all_test_samples)} scanpaths)",
+        f"Model — fixation count\n(N={len(model_samples)} runs)",
+        f"Training data — dwell time\n(N={len(train_samples)} scanpaths)",
+    ]
+    matrices = [fracs_part.T, fracs_all.T, fracs_model.T, fracs_train.T]   # each [6, MF]
+
+    # shared colour scale across all panels so comparisons are honest
+    vmax = max(m.max() for m in matrices) or 1.0
+
+    fig, axes = plt.subplots(1, 4, figsize=(22, 4), sharey=True)
+    for ax, mat, title in zip(axes, matrices, titles):
+        im = ax.imshow(mat, aspect='auto', origin='upper',
+                       cmap='YlOrRd', vmin=0, vmax=vmax)
+        ax.set_xticks(range(MF));   ax.set_xticklabels(fix_labels, fontsize=8)
+        ax.set_yticks(range(6));    ax.set_yticklabels(dial_labels, fontsize=8)
+        ax.set_xlabel("Fixation index")
+        ax.set_title(title, fontsize=9)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Fraction")
+
+    fig.suptitle(f"Dwell-time fraction per fixation step  |  {tag}\n"
+                 f"Does the model track the participant / test population, "
+                 f"or just the training prior?",
+                 fontsize=11)
+    plt.tight_layout()
+    p = OUT_DIR / f"{tag}_aoi_by_fixnum.png"
     plt.savefig(p, dpi=120, bbox_inches='tight'); plt.close()
     print(f"Saved -> {p}")
 
@@ -423,11 +591,12 @@ def main():
         avg_p_center_aligned = [avg_c[fti[k]] for k, _ in target]
         avg_p_spread_aligned = [avg_s[fti[k]] for k, _ in target]
 
-    # Collect fixations for heatmap
-    all_xs, all_ys = [], []
+    # Collect fixations for heatmap + AOI fractions
+    all_xs, all_ys, all_Ts = [], [], []
     for samples in tqdm(by_frame.values(), desc="Collecting fixations", unit="frame"):
         for s in samples:
-            all_xs.extend(s['X'][:s['length']]); all_ys.extend(s['Y'][:s['length']])
+            n = s['length']
+            all_xs.extend(s['X'][:n]); all_ys.extend(s['Y'][:n]); all_Ts.extend(s['T'][:n])
 
     target_xs, target_ys, target_Ts = [], [], []
     for _, s in target:
@@ -447,8 +616,23 @@ def main():
                  list(zip(m_dist, m_center, m_spread)),
                  avg_series, tag)
 
-    plot_routing(aoi_fracs(target_xs, target_ys, target_Ts),
-                 aoi_fracs(pred_xs, pred_ys), tag)
+    train_dwell_fracs, train_count_fracs = train_aoi_fracs()
+
+    plot_routing(
+        aoi_fracs(target_xs, target_ys, target_Ts),   # P1 dwell
+        aoi_fracs(all_xs, all_ys, all_Ts),             # all test dwell
+        aoi_fracs(pred_xs, pred_ys),                   # model (count — no durations)
+        train_dwell_fracs,                              # training dwell
+        tag,
+    )
+    plot_routing_count(
+        aoi_fracs(target_xs, target_ys),               # P1 count
+        aoi_fracs(all_xs, all_ys),                     # all test count
+        aoi_fracs(pred_xs, pred_ys),                   # model count
+        train_count_fracs,                              # training count
+        tag,
+    )
+    plot_routing_by_fixnum(target, predictions, by_frame, tag)
     plot_proximity_correlation(target, by_frame, predictions, tag)
 
     header = f"{'Metric':<22} {'P'+str(PARTICIPANT_ID)+' vs group':>18} {'Model vs group':>18}"
@@ -465,13 +649,16 @@ def main():
             row += f" {np.nanmean(av):>20.1f}"
         print(row)
 
-    target_fracs = aoi_fracs(target_xs, target_ys, target_Ts)
-    model_fracs  = aoi_fracs(pred_xs, pred_ys)
-    print(f"\nAOI fractions — P{PARTICIPANT_ID} vs Model:")
-    print(f"  {'Dial':<6} {'P'+str(PARTICIPANT_ID):>8} {'Model':>8} {'Diff':>8}")
+    target_fracs   = aoi_fracs(target_xs, target_ys, target_Ts)
+    all_test_fracs = aoi_fracs(all_xs, all_ys, all_Ts)
+    model_fracs    = aoi_fracs(pred_xs, pred_ys)
+    print(f"\nAOI dwell fractions — P{PARTICIPANT_ID} | All test | Model | Training:")
+    print(f"  {'Dial':<6} {'P'+str(PARTICIPANT_ID):>8} {'AllTest':>8} {'Model':>8} {'Train':>8} {'M-P':>8} {'M-T':>8}")
     for d in sorted(AOI_BY_POSITION):
-        print(f"  {d:<6} {target_fracs[d]:>8.3f} {model_fracs[d]:>8.3f} "
-              f"{model_fracs[d]-target_fracs[d]:>+8.3f}")
+        print(f"  {d:<6} {target_fracs[d]:>8.3f} {all_test_fracs[d]:>8.3f} "
+              f"{model_fracs[d]:>8.3f} {train_dwell_fracs[d]:>8.3f} "
+              f"{model_fracs[d]-target_fracs[d]:>+8.3f} "
+              f"{model_fracs[d]-train_dwell_fracs[d]:>+8.3f}")
 
     print(f"\nAll outputs saved to {OUT_DIR}/")
 

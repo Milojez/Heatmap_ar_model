@@ -59,7 +59,12 @@ def temporal_mse_loss(temporal_pred, temporal_gt, padding_mask):
 def get_lr(epoch, base_lr, lr_min, warmup_epochs, total_epochs):
     if epoch < warmup_epochs:
         return base_lr * (epoch + 1) / warmup_epochs
-    progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+    t_restart = config.LR_RESTART_EVERY
+    if t_restart > 0:
+        epoch_in_cycle = (epoch - warmup_epochs) % t_restart
+        progress = epoch_in_cycle / t_restart
+    else:
+        progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
     return lr_min + (base_lr - lr_min) * 0.5 * (1 + math.cos(math.pi * progress))
 
 
@@ -137,6 +142,10 @@ def main():
 
     for epoch in range(start_epoch, config.EPOCHS):
         t0 = time.time()
+
+        # Periodically release fragmented CUDA cache
+        if device.type == 'cuda' and epoch % 25 == 0:
+            torch.cuda.empty_cache()
 
         # ── LR schedule ────────────────────────────────────────────────────
         lr = get_lr(epoch, config.LEARNING_RATE, config.LR_MIN,

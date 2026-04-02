@@ -158,6 +158,10 @@ class ScanpathDataset(Dataset):
                     prev_norm = norms[fi - 1] if fi > 0 else (norms[1] if nf > 1 else norms[0])
                     raw_rate  = max(prev_norm - norms[fi], 0.0)
                     row += [math.tanh(raw_rate / (norms[fi] + urgency_eps) / cstats.urgency_std)]
+                if 'distance' in features:
+                    # needle_to_threshold_norm already in [0, 1]: 0 = at threshold, 1 = far away
+                    # invert so that 1 = critical (at threshold), 0 = safe (far away)
+                    row += [1.0 - norms[fi]]
                 frame_tokens.append(row)
             signal_rows.append(frame_tokens)
 

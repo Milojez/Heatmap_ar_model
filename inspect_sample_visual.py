@@ -27,7 +27,7 @@ import matplotlib.cm as cm
 import torch.nn.functional as F
 
 # ── Parameters ────────────────────────────────────────────────────────────────
-SAMPLE_INDEX = 2          # index into the test dataset
+SAMPLE_INDEX = 0          # index into the test dataset
 N_RUNS       = 30         # synthetic participants (generation runs)
 TEMPERATURE  = 1.0        # sampling temperature
 SAVE_OUTPUT  = True       # save figures to VIS_DIR
@@ -272,22 +272,28 @@ def main():
         fontsize=11,
     )
 
-    # Panel 1: % fixation TIME per dial — all participants
-    axes3[0].bar(x, part_time_pct, color=colors)
+    # Panel 1: % fixation TIME per dial — all participants vs model
+    axes3[0].bar(x - w/2, part_time_pct, w,
+                 label=f'All participants (N={len(all_part_xy)})',
+                 color='steelblue', alpha=0.85)
+    axes3[0].bar(x + w/2, pred_time_pct, w,
+                 label=f'Model ({N_RUNS} runs)',
+                 color='tomato', alpha=0.85)
     axes3[0].set_xticks(x)
     axes3[0].set_xticklabels(dial_labels, rotation=30, ha='right')
     axes3[0].set_ylabel('% fixation time')
-    axes3[0].set_title(f'% Fixation time per dial\n(all {len(all_part_xy)} participants)')
+    axes3[0].set_title('% Fixation time per dial')
     axes3[0].set_ylim(0, 100)
+    axes3[0].legend()
     axes3[0].grid(axis='y', alpha=0.3)
 
-    # Panel 2: % fixation COUNT per dial — all participants vs model (grouped bars)
-    bars_p = axes3[1].bar(x - w/2, part_count_pct, w,
-                           label=f'All participants (N={len(all_part_xy)})',
-                           color='steelblue', alpha=0.85)
-    bars_m = axes3[1].bar(x + w/2, pred_count_pct, w,
-                           label=f'Model ({N_RUNS} runs)',
-                           color='tomato', alpha=0.85)
+    # Panel 2: % fixation COUNT per dial — all participants vs model
+    axes3[1].bar(x - w/2, part_count_pct, w,
+                 label=f'All participants (N={len(all_part_xy)})',
+                 color='steelblue', alpha=0.85)
+    axes3[1].bar(x + w/2, pred_count_pct, w,
+                 label=f'Model ({N_RUNS} runs)',
+                 color='tomato', alpha=0.85)
     axes3[1].set_xticks(x)
     axes3[1].set_xticklabels(dial_labels, rotation=30, ha='right')
     axes3[1].set_ylabel('% fixation count')

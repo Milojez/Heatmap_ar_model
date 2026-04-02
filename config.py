@@ -7,7 +7,7 @@ Architecture:
 """
 
 # ─────────────────────────────────────────────
-MODEL_NAME = "hm_ar_base"
+MODEL_NAME = "hm_ar_256_ur_dis"
 
 # ─────────────────────────────────────────────
 # Paths
@@ -22,7 +22,7 @@ FRAMES_DIR = f"{_MODEL_ROOT}/data/frames"
 VIS_DIR    = f"{_MODEL_ROOT}/data/visualizations/{MODEL_NAME}"
 CHECKPOINT_DIR       = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}"
 CHECKPOINT_PATH      = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_last.pth"
-BEST_CHECKPOINT_PATH = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_best.pth"
+BEST_CHECKPOINT_PATH = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_last.pth"
 LOG_PATH             = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_log.csv"
 PLOT_PATH            = f"{_MODEL_ROOT}/checkpoints/{MODEL_NAME}/{MODEL_NAME}_metrics.png"
 PRED_DIR             = f"{_MODEL_ROOT}/data/predictions/{MODEL_NAME}"
@@ -33,7 +33,7 @@ PRED_DIR             = f"{_MODEL_ROOT}/data/predictions/{MODEL_NAME}"
 IMAGE_WIDTH       = 1904
 IMAGE_HEIGHT      = 988
 MAX_FIXATIONS     = 12
-MAX_TRAIN_SAMPLES = 2000    # set None to use all
+MAX_TRAIN_SAMPLES = 10000    # set None to use all
 MAX_VAL_SAMPLES   = 64
 NUM_DIALS         = 6
 NUM_SIGNAL_FRAMES = 10
@@ -41,8 +41,8 @@ NUM_SIGNAL_FRAMES = 10
 # ─────────────────────────────────────────────
 # Conditioning signal features
 # ─────────────────────────────────────────────
-SIGNAL_FEATURES = ['urgency']
-_FEATURE_DIMS   = {'sin_cos': 2, 'speed': 1, 'urgency': 1}
+SIGNAL_FEATURES = ['urgency', 'distance']
+_FEATURE_DIMS   = {'sin_cos': 2, 'speed': 1, 'urgency': 1, 'distance': 1}
 SIGNAL_DIM      = sum(_FEATURE_DIMS[f] for f in SIGNAL_FEATURES)
 
 # ─────────────────────────────────────────────
@@ -55,7 +55,7 @@ HM_SIGMA_CELLS = 2.5  # Gaussian sigma for target smoothing (~50 px in image spa
 # ─────────────────────────────────────────────
 # Model architecture
 # ─────────────────────────────────────────────
-HIDDEN_DIM         = 128
+HIDDEN_DIM         = 256
 NUM_HEADS          = 4
 NUM_ENCODER_BLOCKS = 3    # transformer encoder depth over conditioning tokens
 NUM_GRU_LAYERS     = 1    # GRU decoder depth
@@ -65,12 +65,13 @@ ATTN_DROPOUT       = 0.1
 # Training
 # ─────────────────────────────────────────────
 SEED           = 42
-EPOCHS         = 200
+EPOCHS         = 400
 BATCH_SIZE     = 32
 LEARNING_RATE  = 1e-4
 LR_MIN         = 1e-6
 WARMUP_EPOCHS  = 5
-WEIGHT_DECAY   = 1e-3
+LR_RESTART_EVERY = 100  # cosine restart period in epochs (0 = no restarts)
+WEIGHT_DECAY   = 1e-4
 GRAD_CLIP_NORM = 1.0
 ACCUM_STEPS    = 1
 
@@ -85,7 +86,7 @@ SAVE_EVERY = 0   # 0 = disabled
 # ─────────────────────────────────────────────
 VAL_BATCH_SIZE       = 64
 EVAL_EVERY           = 25
-EVAL_RUNS            = 1
+EVAL_RUNS            = 3
 INFERENCE_TEMPERATURE = 1.0   # softmax temperature at sampling (1.0 = raw probs)
 
 # ─────────────────────────────────────────────
